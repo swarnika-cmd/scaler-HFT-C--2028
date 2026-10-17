@@ -199,7 +199,7 @@ bool small_tests(const char* name) {
 }
 
 // ---------------------------------------------------------------
-// Part 2: the full 1M-op workload, compared against the reference
+// Part 2: workloads compared against the reference
 // ---------------------------------------------------------------
 struct Checker {
     const char* name;
@@ -214,25 +214,72 @@ struct Checker {
     }
 };
 
-int main() {
-    bool all_ok = true;
+// A cancel-heavy workload on a very narrow price band.
+// With only `band` price levels per side, the book empties out often, which the
+// full-band workload almost never does. It also cancels some orders that were
+// already cancelled, to check that a double cancel returns false.
+static std::vector<Op> generate_narrow_workload(int num_ops, int bid_lo, int ask_lo,
+                                                int band, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> percent(0, 99);
+    std::uniform_int_distribution<int> qty_dist(1, 100);
+    std::uniform_int_distribution<int> offset(0, band - 1);
 
-    // ---------- small cases ----------
-    std::cout << "Running small-case tests...\n";
-    bool a_small = small_tests<OrderBookA>("A");
-    bool b_small = small_tests<OrderBookB>("B");
-    bool c_small = small_tests<OrderBookC>("C");
+    std::vector<Op> ops;
+    ops.reserve(num_ops);
 
-    // ---------- full workload ----------
-    std::cout << "\nRunning correctness test on 1,000,000 operations...\n";
-    std::vector<Op> ops = generate_workload();
+    std::vector<uint64_t> live_ids;
+    std::vector<uint64_t> dead_ids;
+    uint64_t next_id = 1;
+
+    for (int i = 0; i < num_ops; ++i) {
+        int roll = percent(rng);
+        OpType type;
+        if (roll < 45)      type = OpType::Add;
+        else if (roll < 90) type = OpType::Cancel;
+        else                type = OpType::BBO;
+
+        // nothing to cancel: query instead, so the book stays near empty
+        if (type == OpType::Cancel && live_ids.empty()) type = OpType::BBO;
+
+        Op op{};
+        op.type = type;
+
+        if (type == OpType::Add) {
+            op.id   = next_id++;
+            op.side = (percent(rng) < 50) ? Side::Buy : Side::Sell;
+            op.tick = (op.side == Side::Buy) ? bid_lo + offset(rng) : ask_lo + offset(rng);
+            op.qty  = qty_dist(rng);
+            live_ids.push_back(op.id);
+        } else if (type == OpType::Cancel) {
+            if (!dead_ids.empty() && percent(rng) < 10) {
+                // cancel an order that is already gone (must return false)
+                std::uniform_int_distribution<size_t> pick(0, dead_ids.size() - 1);
+                op.id = dead_ids[pick(rng)];
+            } else {
+                std::uniform_int_distribution<size_t> pick(0, live_ids.size() - 1);
+                size_t k = pick(rng);
+                op.id = live_ids[k];
+                dead_ids.push_back(op.id);
+                live_ids[k] = live_ids.back();
+                live_ids.pop_back();
+            }
+        }
+        ops.push_back(op);
+    }
+    return ops;
+}
+
+// Runs one workload through the reference and A, B, C.
+// The BBO AND the top 10 levels of both sides are compared after EVERY operation.
+static void compare_workload(const char* title, const std::vector<Op>& ops,
+                             Checker& ca, Checker& cb, Checker& cc) {
+    long a0 = ca.mismatches, b0 = cb.mismatches, c0 = cc.mismatches;
 
     ReferenceBook ref;
     OrderBookA a;
     OrderBookB b;
     OrderBookC c;
-
-    Checker ca{"A"}, cb{"B"}, cc{"C"};
 
     for (size_t i = 0; i < ops.size(); ++i) {
         const Op& op = ops[i];
@@ -248,26 +295,47 @@ int main() {
             cb.record(b.cancel_order(op.id) == r, i);
             cc.record(c.cancel_order(op.id) == r, i);
         }
-        // OpType::BBO has nothing to apply; the BBO is compared below
 
-        // compare the BBO after every operation
         BBO rb = ref.get_bbo();
         ca.record(a.get_bbo() == rb, i);
         cb.record(b.get_bbo() == rb, i);
         cc.record(c.get_bbo() == rb, i);
 
-        // every 100 operations, compare the top 10 levels on both sides
-        if ((i + 1) % 100 == 0) {
-            std::vector<Level> rbids = ref.get_bids(10);
-            std::vector<Level> rasks = ref.get_asks(10);
-            ca.record(a.get_bids(10) == rbids && a.get_asks(10) == rasks, i);
-            cb.record(b.get_bids(10) == rbids && b.get_asks(10) == rasks, i);
-            cc.record(c.get_bids(10) == rbids && c.get_asks(10) == rasks, i);
-        }
+        std::vector<Level> rbids = ref.get_bids(10);
+        std::vector<Level> rasks = ref.get_asks(10);
+        ca.record(a.get_bids(10) == rbids && a.get_asks(10) == rasks, i);
+        cb.record(b.get_bids(10) == rbids && b.get_asks(10) == rasks, i);
+        cc.record(c.get_bids(10) == rbids && c.get_asks(10) == rasks, i);
     }
+
+    std::cout << "  " << title << "\n"
+              << "    mismatches: A=" << ca.mismatches - a0
+              << "  B=" << cb.mismatches - b0
+              << "  C=" << cc.mismatches - c0 << "\n";
+}
+
+int main() {
+    // ---------- small cases ----------
+    std::cout << "Running small-case tests...\n";
+    bool a_small = small_tests<OrderBookA>("A");
+    bool b_small = small_tests<OrderBookB>("B");
+    bool c_small = small_tests<OrderBookC>("C");
+
+    // ---------- workloads ----------
+    std::cout << "\nRunning workload comparisons (BBO and top-10 depth checked after every op)...\n";
+    Checker ca{"A"}, cb{"B"}, cc{"C"};
+
+    compare_workload("1,000,000 ops, full price band (the benchmark workload)",
+                     generate_workload(), ca, cb, cc);
+    compare_workload("200,000 ops, cancel-heavy, 10-tick band near the mid price",
+                     generate_narrow_workload(200000, 9990, 10001, 10, 7), ca, cb, cc);
+    compare_workload("200,000 ops, cancel-heavy, 10-tick band at the range edges (5000 / 15000)",
+                     generate_narrow_workload(200000, BID_MIN_TICK, ASK_MAX_TICK - 9, 10, 8),
+                     ca, cb, cc);
 
     // ---------- report ----------
     std::cout << "\nResults:\n";
+    bool all_ok = true;
     Checker* all[3] = {&ca, &cb, &cc};
     bool small_ok[3] = {a_small, b_small, c_small};
     for (int k = 0; k < 3; ++k) {

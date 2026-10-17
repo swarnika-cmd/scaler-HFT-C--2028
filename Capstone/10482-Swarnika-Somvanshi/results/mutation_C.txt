@@ -13,12 +13,18 @@ Running small-case tests...
     FAILED: book should be empty after the only order is cancelled
     FAILED: book should be empty after cancelling the edge orders
 
-Running correctness test on 1,000,000 operations...
+Running workload comparisons (BBO and top-10 depth checked after every op)...
+  1,000,000 ops, full price band (the benchmark workload)
+    mismatches: A=0  B=0  C=0
+  200,000 ops, cancel-heavy, 10-tick band near the mid price
+    mismatches: A=0  B=0  C=0
+  200,000 ops, cancel-heavy, 10-tick band at the range edges (5000 / 15000)
+    mismatches: A=0  B=0  C=4
 
 Results:
 Implementation A: PASS
 Implementation B: PASS
-Implementation C: FAIL
+Implementation C: FAIL  (4 mismatches, first at op 7)
 Some implementations FAILED.
 
 # exit code: 1

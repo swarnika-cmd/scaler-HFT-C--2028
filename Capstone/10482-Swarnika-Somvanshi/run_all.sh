@@ -32,13 +32,14 @@ for I in A B C; do
 done
 
 echo
-echo "=== perf record (call graphs) ==="
+echo "=== perf record (call graphs, one pass each) ==="
 for I in A B C; do
     echo "perf record: implementation $I"
-    taskset -c $CORE perf record -g -o results/perf_$I.data ./bench --impl $I > /dev/null 2>&1 \
+    timeout 120 taskset -c $CORE perf record -F 999 -g -o results/perf_$I.data \
+        ./bench --impl $I --runs 1 > /dev/null 2>&1 \
         || echo "  perf record failed for $I"
-    perf report -i results/perf_$I.data --stdio --no-children 2> /dev/null \
-        | head -80 > results/perf_report_$I.txt
+    perf report -i results/perf_$I.data --stdio --no-children -g none 2> /dev/null \
+        | grep -v '^$' | head -40 > results/perf_report_$I.txt
 done
 
 echo

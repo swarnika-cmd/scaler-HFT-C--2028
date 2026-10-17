@@ -17,10 +17,16 @@ Running small-case tests...
   C small tests:
     all passed
 
-Running correctness test on 1,000,000 operations...
+Running workload comparisons (BBO and top-10 depth checked after every op)...
+  1,000,000 ops, full price band (the benchmark workload)
+    mismatches: A=110849  B=0  C=0
+  200,000 ops, cancel-heavy, 10-tick band near the mid price
+    mismatches: A=1680  B=0  C=0
+  200,000 ops, cancel-heavy, 10-tick band at the range edges (5000 / 15000)
+    mismatches: A=3398  B=0  C=0
 
 Results:
-Implementation A: FAIL  (5870 mismatches, first at op 1)
+Implementation A: FAIL  (115927 mismatches, first at op 1)
 Implementation B: PASS
 Implementation C: PASS
 Some implementations FAILED.
