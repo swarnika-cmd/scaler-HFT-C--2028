@@ -1,15 +1,24 @@
+# Mutation C: bid scan stops at index 0 instead of falling to -1 (empty book still reports a bid)
+# File: implem_c.h
+# Original: while (best_bid_ >= 0 && bid_qty_[best_bid_] == 0) --best_bid_;
+# Broken:   while (best_bid_ > 0 && bid_qty_[best_bid_] == 0) --best_bid_;
+# (output below is from ./test run on the BROKEN copy)
+
 Running small-case tests...
   A small tests:
     all passed
   B small tests:
     all passed
   C small tests:
-    all passed
+    FAILED: book should be empty after the only order is cancelled
+    FAILED: book should be empty after cancelling the edge orders
 
 Running correctness test on 1,000,000 operations...
 
 Results:
 Implementation A: PASS
 Implementation B: PASS
-Implementation C: PASS
-All implementations produce identical results.
+Implementation C: FAIL
+Some implementations FAILED.
+
+# exit code: 1

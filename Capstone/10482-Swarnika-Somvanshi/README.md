@@ -29,6 +29,7 @@ I built a single-instrument resting order book in C++17 three different ways: a 
 | `bench.cpp` | One benchmark program for all three, chosen with `--impl A\|B\|C` |
 | `run_all.sh` | Compiles, runs the tests and benchmarks, then collects `perf stat` and `perf record` data |
 | `results/` | Saved output: test result, benchmark results, `perf stat` files and `perf record` reports |
+| `mutation_lab.py` | Applies each deliberate bug to a temporary copy, runs `test.cpp`, and saves the output to `results/mutation_*.txt` |
 
 ## 3. Build and run
 
@@ -132,9 +133,11 @@ I repeated the `perf` commands for `--impl B` and `--impl C`. `./run_all.sh` doe
 
 **Mutation testing.** To check that the tests really catch bugs, I broke each implementation on purpose, ran `./test`, and then restored the code:
 
-- **A:** I commented out the line that erases a level when its quantity reaches 0. Empty levels then stayed in the map. Result: 6 of the small tests failed and the full workload found 5,870 mismatches, the first at op 1 (the first cancel). B and C still passed.
-- **B:** I made `before()` always compare `a < b`, so ask levels were sorted the wrong way and the best ask became the highest price instead of the lowest.
-- **C:** I changed the bid scan from `best_bid_ >= 0` to `best_bid_ > 0`, so after the last bid was cancelled `best_bid_` stayed at 0 instead of becoming -1 and the empty book still reported a bid.
+- **A:** I removed the line that erases a level when its quantity reaches 0, so empty levels stayed in the map. Result: `FAIL` with 5,870 mismatches in the 1M-op workload, the first at op 1 (the first cancel), plus failures in the small tests. B and C still passed. Output: `results/mutation_A.txt`.
+- **B:** I made `before()` always compare `a < b`, so ask levels were sorted the wrong way and the best ask became the highest price. Result: `FAIL` with 1,009,989 mismatches, the first at op 11. The count is above 1,000,000 because one operation can fail several comparisons (cancel result, BBO and depth). Output: `results/mutation_B.txt`.
+- **C:** I changed the bid scan from `best_bid_ >= 0` to `best_bid_ > 0`, so after the last bid was cancelled `best_bid_` stayed at 0 instead of becoming -1, and an empty book still reported a bid. Result: `FAIL`, caught by the small tests only (the check that the book is empty after cancelling the edge orders). The 1M-op workload reported no mismatches for C, because with random prices over 5,000 levels neither side ever becomes completely empty, so the scan never reaches the end of the array. This showed me that a large random workload can miss boundary bugs, and that small targeted tests are worth keeping. Output: `results/mutation_C.txt`.
+
+The mutations are produced by `mutation_lab.py`, which breaks a temporary copy of each file (my real source is never touched) and saves the real test output.
 
 Output of the unbroken code:
 

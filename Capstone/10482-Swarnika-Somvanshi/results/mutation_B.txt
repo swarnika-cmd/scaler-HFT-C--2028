@@ -1,8 +1,15 @@
+# Mutation B: before() always compares a < b, so ask levels are sorted the wrong way
+# File: implem_b.h
+# Original: bool before(int a, int b) const { return is_bid ? a < b : a > b; }
+# Broken:   bool before(int a, int b) const { return a < b; }
+# (output below is from ./test run on the BROKEN copy)
+
 Running small-case tests...
   A small tests:
     all passed
   B small tests:
-    all passed
+    FAILED: asks should be ordered best (lowest) first
+    FAILED: BBO at the edges of the price range
   C small tests:
     all passed
 
@@ -10,6 +17,8 @@ Running correctness test on 1,000,000 operations...
 
 Results:
 Implementation A: PASS
-Implementation B: PASS
+Implementation B: FAIL  (1009989 mismatches, first at op 11)
 Implementation C: PASS
-All implementations produce identical results.
+Some implementations FAILED.
+
+# exit code: 1

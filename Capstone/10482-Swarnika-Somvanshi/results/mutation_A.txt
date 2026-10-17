@@ -1,0 +1,28 @@
+# Mutation A: never erase a price level when its quantity reaches 0
+# File: implem_a.h
+# Original: if (it->second == 0) m.erase(it);
+# Broken:   if (it->second == 0) {}
+# (output below is from ./test run on the BROKEN copy)
+
+Running small-case tests...
+  A small tests:
+    FAILED: book should be empty after the only order is cancelled
+    FAILED: best bid should fall back to 9990
+    FAILED: best ask should move up to 10050
+    FAILED: best bid should become the lowest tick 5000
+    FAILED: best ask should become the highest tick 15000
+    FAILED: book should be empty after cancelling the edge orders
+  B small tests:
+    all passed
+  C small tests:
+    all passed
+
+Running correctness test on 1,000,000 operations...
+
+Results:
+Implementation A: FAIL  (5870 mismatches, first at op 1)
+Implementation B: PASS
+Implementation C: PASS
+Some implementations FAILED.
+
+# exit code: 1
