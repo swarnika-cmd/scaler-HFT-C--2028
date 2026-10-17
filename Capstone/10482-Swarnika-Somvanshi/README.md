@@ -25,11 +25,11 @@ I built a single-instrument resting order book in C++17 three different ways: a 
 | `implem_b.h` | Implementation B (sorted vectors + binary search) |
 | `implem_c.h` | Implementation C (price-indexed arrays) |
 | `workload.h` | Generates the same 1M operations every time (`std::mt19937`, seed 42) |
-| `test.cpp` | Edge-case tests, then the 1M-op workload run through a reference book and A, B and C |
+| `test.cpp` | Edge-case tests, then three workloads compared against a reference book after every operation |
+| `mutation_lab.py` | Applies each deliberate bug to a temporary copy, runs `test.cpp`, and saves the output to `results/mutation_*.txt` |
 | `bench.cpp` | One benchmark program for all three, chosen with `--impl A\|B\|C` |
 | `run_all.sh` | Compiles, runs the tests and benchmarks, then collects `perf stat` and `perf record` data |
 | `results/` | Saved output: test result, benchmark results, `perf stat` files and `perf record` reports |
-| `mutation_lab.py` | Applies each deliberate bug to a temporary copy, runs `test.cpp`, and saves the output to `results/mutation_*.txt` |
 
 ## 3. Build and run
 
@@ -63,6 +63,12 @@ perf report --stdio --no-children
 ```
 
 I repeated the `perf` commands for `--impl B` and `--impl C`. `./run_all.sh` does all of this in one go and saves the output in `results/`.
+
+To redo the deliberate-bug experiments (they run on a temporary copy, so my source files are not touched):
+
+```bash
+python3 mutation_lab.py
+```
 
 `--runs N` is an optional flag on `bench` (default 5). I used `--runs 1` for `perf record` because recording five passes made it very slow on my laptop.
 
@@ -129,17 +135,21 @@ I repeated the `perf` commands for `--impl B` and `--impl C`. `./run_all.sh` doe
 
 **Edge cases.** `test.cpp` runs the same small tests on each implementation: an empty book (`has_bid` and `has_ask` are false), asking for more depth than there are levels (it returns what exists), cancelling an unknown ID, cancelling the same order twice, two orders at one price adding up, the best price moving after the best level is cancelled, the 10-level depth limit, and the lowest and highest ticks of each side (5000, 9999, 10001, 15000).
 
-**Full workload.** I wrote a deliberately simple reference book using only plain `std::map`s. `test.cpp` runs the 1M-operation workload through the reference and A, B and C at the same time. After every operation it compares each implementation's cancel result and BBO to the reference, and every 100 operations it compares the top 10 bid levels and top 10 ask levels.
+**Workloads.** I wrote a deliberately simple reference book using only plain `std::map`s. I compare each implementation against it after **every** operation: the cancel result, the BBO, and the top 10 bid and ask levels. I run three workloads through the reference and A, B and C together:
 
-**Mutation testing.** To check that the tests really catch bugs, I broke each implementation on purpose, ran `./test`, and then restored the code:
+1. The 1,000,000-op benchmark workload (full price band).
+2. A 200,000-op cancel-heavy workload on a 10-tick band near the mid price. The book empties often, which the full-band workload almost never does.
+3. A 200,000-op cancel-heavy workload on a 10-tick band at the edges of the allowed range (bids at ticks 5000 to 5009, asks at 14991 to 15000). It also cancels some already-cancelled orders on purpose, to check that a double cancel returns `false`.
 
-- **A:** I removed the line that erases a level when its quantity reaches 0, so empty levels stayed in the map. Result: `FAIL` with 5,870 mismatches in the 1M-op workload, the first at op 1 (the first cancel), plus failures in the small tests. B and C still passed. Output: `results/mutation_A.txt`.
-- **B:** I made `before()` always compare `a < b`, so ask levels were sorted the wrong way and the best ask became the highest price. Result: `FAIL` with 1,009,989 mismatches, the first at op 11. The count is above 1,000,000 because one operation can fail several comparisons (cancel result, BBO and depth). Output: `results/mutation_B.txt`.
-- **C:** I changed the bid scan from `best_bid_ >= 0` to `best_bid_ > 0`, so after the last bid was cancelled `best_bid_` stayed at 0 instead of becoming -1, and an empty book still reported a bid. Result: `FAIL`, caught by the small tests only (the check that the book is empty after cancelling the edge orders). The 1M-op workload reported no mismatches for C, because with random prices over 5,000 levels neither side ever becomes completely empty, so the scan never reaches the end of the array. This showed me that a large random workload can miss boundary bugs, and that small targeted tests are worth keeping. Output: `results/mutation_C.txt`.
+**Mutation testing.** To check that the tests really catch bugs, I broke each implementation on a temporary copy (`mutation_lab.py`, my real source is never touched), ran `./test`, and saved the real output in `results/`:
 
-The mutations are produced by `mutation_lab.py`, which breaks a temporary copy of each file (my real source is never touched) and saves the real test output.
+- **A:** I removed the line that erases a level when its quantity reaches 0, so empty levels stayed in the map. Result: `FAIL`, 115,927 mismatches, first at op 1 (the first cancel), plus failures in the small tests. B and C still passed. Output: `results/mutation_A.txt`.
+- **B:** I made `before()` always compare `a < b`, so ask levels were sorted the wrong way and the best ask became the highest price. Result: `FAIL`, 2,799,892 mismatches, first at op 11. The count is bigger than the number of operations because one operation can fail several comparisons, and a broken book keeps failing on later operations. Output: `results/mutation_B.txt`.
+- **C:** I changed the bid scan from `best_bid_ >= 0` to `best_bid_ > 0`, so after the last bid at tick 5000 was cancelled, `best_bid_` stayed at index 0 instead of becoming -1 and an empty book still reported a bid. Result: `FAIL`, 4 mismatches, first at op 7, plus a failure in the small tests. Output: `results/mutation_C.txt`.
 
-Output of the unbroken code:
+The C mutation taught me something about my own tests. At first, only the small tests caught it, and the random 1M-op workload reported no mismatches, because with random prices over 5,000 levels neither side ever empties completely. The near-mid-price band did not catch it either, because its bids sit far from array index 0. Only the edge-band workload reaches the bug. So I added the two narrow workloads and the check after every operation, and I learned that a large random workload can miss boundary bugs, which is why targeted workloads and small tests matter.
+
+Output of the unbroken code (`results/test_output.txt`):
 
 ```
 Running small-case tests...
@@ -150,7 +160,13 @@ Running small-case tests...
   C small tests:
     all passed
 
-Running correctness test on 1,000,000 operations...
+Running workload comparisons (BBO and top-10 depth checked after every op)...
+  1,000,000 ops, full price band (the benchmark workload)
+    mismatches: A=0  B=0  C=0
+  200,000 ops, cancel-heavy, 10-tick band near the mid price
+    mismatches: A=0  B=0  C=0
+  200,000 ops, cancel-heavy, 10-tick band at the range edges (5000 / 15000)
+    mismatches: A=0  B=0  C=0
 
 Results:
 Implementation A: PASS
