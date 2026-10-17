@@ -1,78 +1,70 @@
-// workload.h - repeatable random workload, generated BEFORE any timing starts
-// so RNG cost never shows up in the benchmark numbers.
+// workload.h
+// Builds the same list of 1,000,000 operations every time (seed 42).
 #pragma once
+
 #include <cstdint>
 #include <random>
 #include <vector>
+
 #include "common.h"
 
-enum class OpType : uint8_t { Add, Cancel, Bbo, Depth };
+enum class OpType { Add, Cancel, BBO };
 
 struct Op {
-    OpType type;
-    Side side;     // Add only
-    int tick;      // Add only
-    long qty;      // Add only
-    uint64_t id;   // Add and Cancel
+    OpType   type;
+    uint64_t id;     // used by Add and Cancel
+    Side     side;   // used by Add
+    int      tick;   // used by Add
+    long     qty;    // used by Add
 };
 
-struct WorkloadCfg {
-    int n = 1'000'000;      // main ops (Depth ops are extra, one per 100 main ops)
-    unsigned seed = 42;
-    int add_pct = 70;
-    int cancel_pct = 20;    // remainder = BBO queries
-    int bid_lo = BID_MIN_TICK, bid_hi = BID_MAX_TICK;
-    int ask_lo = ASK_MIN_TICK, ask_hi = ASK_MAX_TICK;
-    int bogus_cancel_pct = 0;  // % of cancels aimed at unknown / already-cancelled ids
-};
+// The "every 100 ops, call get_bids(10) and get_asks(10)" rule is NOT stored
+// in the list. The benchmark and the test do it themselves with: (i + 1) % 100 == 0
 
-constexpr uint64_t kUnknownIdBase = 10'000'000'000ULL;  // never added, huge on purpose
-
-inline std::vector<Op> make_workload(const WorkloadCfg& c) {
-    std::mt19937 rng(c.seed);
-    auto rnd = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+inline std::vector<Op> generate_workload(int num_ops = 1000000, unsigned seed = 42) {
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> percent(0, 99);
+    std::uniform_int_distribution<int> qty_dist(1, 100);
+    std::uniform_int_distribution<int> bid_dist(BID_MIN_TICK, BID_MAX_TICK);
+    std::uniform_int_distribution<int> ask_dist(ASK_MIN_TICK, ASK_MAX_TICK);
 
     std::vector<Op> ops;
-    ops.reserve(static_cast<size_t>(c.n) + c.n / 100 + 1);
-    std::vector<uint64_t> live;  // ids currently resting in the book
-    std::vector<uint64_t> dead;  // already cancelled ids (only kept for bogus cancels)
-    live.reserve(c.n);
-    uint64_t next_id = 1;
+    ops.reserve(num_ops);
 
-    for (int i = 0; i < c.n; ++i) {
-        const int r = rnd(0, 99);
-        OpType t = r < c.add_pct ? OpType::Add
-                 : r < c.add_pct + c.cancel_pct ? OpType::Cancel
-                 : OpType::Bbo;
+    std::vector<uint64_t> live_ids;   // orders that are currently in the book
+    uint64_t next_id = 1;             // IDs go 1, 2, 3, ... and are never reused
 
-        if (t == OpType::Cancel) {
-            const bool bogus = c.bogus_cancel_pct > 0 && rnd(0, 99) < c.bogus_cancel_pct;
-            if (bogus) {
-                uint64_t id = (!dead.empty() && rnd(0, 1))
-                                  ? dead[rnd(0, static_cast<int>(dead.size()) - 1)]
-                                  : kUnknownIdBase + static_cast<uint64_t>(rnd(0, 1'000'000));
-                ops.push_back({OpType::Cancel, Side::Buy, 0, 0, id});
-            } else if (live.empty()) {
-                t = OpType::Add;  // nothing live to cancel -> turn into an add
-            } else {
-                const int idx = rnd(0, static_cast<int>(live.size()) - 1);
-                const uint64_t id = live[idx];
-                live[idx] = live.back();  // swap-remove: O(1), always a live target
-                live.pop_back();
-                if (c.bogus_cancel_pct > 0 && dead.size() < 10000) dead.push_back(id);
-                ops.push_back({OpType::Cancel, Side::Buy, 0, 0, id});
-            }
+    for (int i = 0; i < num_ops; ++i) {
+        int roll = percent(rng);
+
+        OpType type;
+        if (roll < 70)      type = OpType::Add;
+        else if (roll < 90) type = OpType::Cancel;
+        else                type = OpType::BBO;
+
+        // A cancel needs a live order. If there is none yet, make it an add instead.
+        if (type == OpType::Cancel && live_ids.empty()) type = OpType::Add;
+
+        Op op{};
+        op.type = type;
+
+        if (type == OpType::Add) {
+            op.id   = next_id++;
+            op.side = (percent(rng) < 50) ? Side::Buy : Side::Sell;
+            op.tick = (op.side == Side::Buy) ? bid_dist(rng) : ask_dist(rng);
+            op.qty  = qty_dist(rng);
+            live_ids.push_back(op.id);
+        } else if (type == OpType::Cancel) {
+            // pick a random live order, then remove it from the live list
+            std::uniform_int_distribution<size_t> pick(0, live_ids.size() - 1);
+            size_t k = pick(rng);
+            op.id = live_ids[k];
+            live_ids[k] = live_ids.back();   // swap with the last one...
+            live_ids.pop_back();             // ...and drop it (fast removal)
         }
-        if (t == OpType::Add) {
-            const Side s = rnd(0, 1) ? Side::Buy : Side::Sell;
-            const int tick = (s == Side::Buy) ? rnd(c.bid_lo, c.bid_hi) : rnd(c.ask_lo, c.ask_hi);
-            ops.push_back({OpType::Add, s, tick, rnd(1, 100), next_id});
-            live.push_back(next_id++);
-        } else if (t == OpType::Bbo) {
-            ops.push_back({OpType::Bbo, Side::Buy, 0, 0, 0});
-        }
+        // BBO needs no extra fields
 
-        if ((i + 1) % 100 == 0) ops.push_back({OpType::Depth, Side::Buy, 0, 0, 0});
+        ops.push_back(op);
     }
     return ops;
 }
